@@ -1,0 +1,150 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Video {
+  id            String   @id @default(cuid())
+  sourceType    String   @default("youtube_single") // youtube_channel, youtube_single, local_upload
+  youtubeId     String?  @unique
+  channelId     String?
+  title         String
+  description   String?
+  duration      Int      @default(0)       // seconds
+  localPath     String?
+  thumbnailUrl  String?
+  status        String   @default("pending") // pending, downloading, cached, missing, error
+  fileSize      Int      @default(0)
+  resolution    String?
+  codecVideo    String?
+  codecAudio    String?
+  createdAt     DateTime @default(now())
+  downloadedAt  DateTime?
+  lastUsedAt    DateTime?
+  useCount      Int      @default(0)
+
+  streamTasks   StreamTask[]
+  playlistItems PlayListItem[]
+  backupForPlaylists PlayList[] @relation("PlaylistBackup")
+
+  @@index([channelId])
+  @@index([status])
+}
+
+model PlayList {
+  id            String   @id @default(cuid())
+  name          String
+  description   String?
+  loop          Boolean  @default(true)       // whether to loop the playlist
+  backupVideoId String?  @unique
+  backupVideo   Video?   @relation("PlaylistBackup", fields: [backupVideoId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  items         PlayListItem[]
+  streamTasks   StreamTask[]
+}
+
+model PlayListItem {
+  id         String   @id @default(cuid())
+  playlistId String
+  playlist   PlayList @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  videoId    String
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@unique([playlistId, videoId])
+  @@index([playlistId])
+}
+
+model StreamTask {
+  id              String   @id @default(cuid())
+  name            String
+  videoId         String?
+  video           Video?   @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  playlistId      String?
+  playlist        PlayList? @relation(fields: [playlistId], references: [id], onDelete: SetNull)
+  primaryRtmpUrl  String
+  backupRtmpUrl   String?
+  videoBitrate    Int      @default(4000)
+  audioBitrate    Int      @default(128)
+  resolution      String   @default("1920x1080")
+  fps             Int      @default(30)
+  preset          String   @default("ultrafast")
+  status          String   @default("idle") // idle, preparing, live, failover, stopped, error
+  currentPid      Int?
+  isFailoverActive Boolean @default(false)
+  startedAt       DateTime?
+  stoppedAt       DateTime?
+  totalDuration   Int      @default(0)
+  failoverCount   Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+}
+
+model RelayTarget {
+  id           String     @id @default(cuid())
+  relayTaskId  String
+  relayTask    RelayTask  @relation(fields: [relayTaskId], references: [id], onDelete: Cascade)
+  platform     String
+  rtmpUrl      String
+  streamKey    String?
+  enabled      Boolean    @default(true)
+}
+
+model RelayTask {
+  id                String        @id @default(cuid())
+  name              String
+  sourceYoutubeUrl  String
+  sourceQuality     String        @default("best")
+  status            String        @default("idle")
+  currentPid        Int?
+  startedAt         DateTime?
+  stoppedAt         DateTime?
+  bytesTransferred  Int           @default(0)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  targets           RelayTarget[]
+
+  @@index([status])
+}
+
+model SystemConfig {
+  id          String @id @default(cuid())
+  key         String @unique
+  value       String?
+  description String?
+}
+
+model AlertLog {
+  id        String   @id @default(cuid())
+  level     String   @default("info") // info, warning, critical
+  type      String
+  message   String
+  taskId    String?
+  resolved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level])
+}
+
+model StreamLog {
+  id        String   @id @default(cuid())
+  taskId    String
+  taskType  String   // stream, relay
+  action    String   // start, stop, error, failover
+  message   String
+  metadata  String?  // JSON string
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([createdAt])
+}
