@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Database (regenerated)
+db/custom.db
+db/custom.db-journal
+db/custom.db-wal
+
+*.ytdl
+*.part
+
+# Downloaded videos (large files)
+download/videos/*.mp4
+download/videos/*.webm
+download/videos/*.mkv
+download/videos/*.info.json
+download/standby/*.mp4
+download/standby/*.webm
+
+# Cookies (sensitive)
+download/cookies.txt
+
+# Logs (top-level logs/ dir only, not src/app/api/logs/)
+/logs/
+/download/logs/
+*.log
+stream-engine.log
+dev.log
+
+# Upload directory
+upload/
+
+# Examples (reference only)
+examples/
+
+# Agent context (workspace artifacts)
+agent-ctx/
+
+# Mini-service logs in .zscripts
+.zscripts/dev.out.log
+.zscripts/dev.pid
+.zscripts/mini-service-stream-engine.log
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.tar
+*.tar.gz
+*.part
+worklog_new.md
+
+# Skills (system-provided, not project code)
+skills/
