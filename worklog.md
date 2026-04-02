@@ -581,3 +581,222 @@ Stage Summary:
 - start.sh 修复生产环境 db:push 路径
 - engine-keeper.ts 兼容开发和生产环境不同入口文件名
 - 模拟构建验证通过：Prisma 查询正常工作
+
+---
+Task ID: SOP-001
+Agent: Main Agent
+Task: 复盘项目启动流程，形成 SOP 标准操作文档
+
+Work Log:
+- 通过 `ps aux --forest` 查看进程树，还原实际启动链路
+- 通过 `ps -eo pid,ppid,lstart,cmd` 确认进程启动顺序和时间
+- 通过 `lsof -i :PORT` 确认各端口归属进程
+- 读取 `/start.sh`（系统级入口）还原完整 boot sequence
+- 读取 `mini-service-stream-engine.log` 发现 dev.sh 的 stream-engine 启动因 EADDRINUSE 失败（真正的 3001 端口由 engine-keeper 通过 next-server spawn）
+- 读取 `engine-keeper.ts` 和 `engine.ts` 确认 engine 实际是通过 API 调用时 lazy start 的
+
+Stage Summary:
+- 完整 SOP 文档已沉淀到本节（见下方）
+
+# ═══════════════════════════════════════════════════════════════
+# 项目启动 SOP（Standard Operating Procedure）
+# ═══════════════════════════════════════════════════════════════
+
+## 一、系统启动全流程（从容器启动到服务可用）
+
+```
+tini (/start.sh)                    ← PID 1，容器入口
+├── caddy run                        ← PID 2，Caddy 反代 (port 81)
+├── /start.sh (主流程)
+│   ├── uv run main.py               ← ZAI 控制服务 (port 12600)
+│   └── sudo -u z bash .zscripts/dev.sh   ← 项目 dev 流程
+│       ├── bun install
+│       ├── bun run db:push
+│       ├── 检查/安装 yt-dlp → download/tools/yt-dlp
+│       ├── 清理端口 3001、4000 上的残留进程
+│       ├── bun run dev              ← Next.js dev server (port 3000)
+│       │   ├── next-server
+│       │   │   ├── postcss worker
+│       │   │   └── bun stream-engine/index.ts  ← ⚠️ engine-keeper lazy spawn (port 3001)
+│       ├── wait_for_service localhost:3000
+│       ├── health check (curl localhost:3000)
+│       ├── start_mini_services()    ← 扫描 mini-services/*，bun install + bun run dev
+│       │   ├── stream-engine  → EADDRINUSE 失败（engine-keeper 已占了 3001）⚠️
+│       │   └── proxy           → ✅ 成功启动 (port 4000)
+│       └── sleep 60 (保持脚本存活)
+└── (最后) Caddy exec 前台           ← /start.sh 的最后一步
+```
+
+## 二、关键发现：Stream Engine 的实际启动方式
+
+**dev.sh 的 `start_mini_services()` 尝试启动 stream-engine 会失败**（EADDRINUSE），因为：
+
+1. Next.js dev server 启动后，首次有 API 路由调用 `src/lib/engine.ts` 的 `callEngine()`
+2. `callEngine()` 每次调用前先执行 `ensureEngineRunning()`（来自 `engine-keeper.ts`）
+3. `ensureEngineRunning()` 检测到 3001 无响应 → `spawn('bun', [entryPath])` 启动 stream-engine
+4. stream-engine 作为 next-server 的子进程运行（ppid=next-server），独占 3001
+5. 之后 dev.sh 的 `start_mini_services()` 再尝试启动 stream-engine → 端口冲突
+
+**结论：stream-engine 的可靠启动路径是 engine-keeper lazy start，不是 dev.sh 的 mini-services 扫描。**
+
+## 三、三个服务的端口和职责
+
+| 端口 | 服务 | 启动方式 | 职责 |
+|------|------|----------|------|
+| 3000 | Next.js Dev Server | dev.sh → `bun run dev` | 前端 + API 路由 |
+| 3001 | Stream Engine | engine-keeper lazy start | FFmpeg 推流/转播进程管理 |
+| 4000 | Proxy → 3000 | dev.sh → start_mini_services() | 反向代理，对外稳定入口 |
+| 81 | Caddy Gateway | /start.sh → `exec caddy` | XTransformPort 端口路由 |
+| 12600 | ZAI 控制服务 | /start.sh | 系统级 AI 服务 |
+
+## 四、手动操作 SOP
+
+### 4.1 冷启动（从零开始）
+
+```bash
+# 整个系统由 /start.sh 自动驱动，无需手动操作
+# 容器启动后自动执行完整流程（约 30-60 秒全部就绪）
+```
+
+### 4.2 重启所有服务
+
+```bash
+# ⚠️ 不能直接 ./dev.sh，会和 /start.sh 的进程冲突
+# 正确做法：重启 mini-services
+
+# 1. 清理残留
+lsof -t -i :4000 | xargs kill -9 2>/dev/null || true
+lsof -t -i :3001 | xargs kill -9 2>/dev/null || true
+
+# 2. 手动启动 proxy（如果需要）
+cd /home/z/my-project/mini-services/proxy && bun run dev &
+
+# 3. stream-engine 不需要手动启动
+#    下次 API 调用 engine 时，engine-keeper 会自动拉起
+```
+
+### 4.3 只重启单个服务
+
+```bash
+# 重启 proxy
+kill $(lsof -t -i :4000) 2>/dev/null; cd /home/z/my-project/mini-services/proxy && bun run dev &
+
+# 重启 stream-engine（engine-keeper 会自动重启，也可手动）
+kill $(lsof -t -i :3001) 2>/dev/null
+# 下次 API 请求会触发 ensureEngineRunning() 自动拉起
+
+# 重启 Next.js（不能直接杀，会破坏 engine-keeper 的父子关系）
+# 建议直接重启整个容器
+```
+
+### 4.4 检查服务状态
+
+```bash
+# 一键检查所有端口
+lsof -i :3000 -i :3001 -i :4000 -i :81 -i :12600 2>/dev/null | grep LISTEN
+
+# 检查 engine 健康
+curl -s http://127.0.0.1:3001/health | jq .
+
+# 检查 proxy 健康
+curl -s http://127.0.0.1:4000/__proxy_health | jq .
+
+# 检查 Next.js
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000
+
+# 查看进程树
+ps aux --forest | grep -E "caddy|bun|next|stream|proxy|main.py"
+```
+
+## 五、已知陷阱和解决方案
+
+### 5.1 `set -euo pipefail` 杀脚本
+
+**问题**：`lsof` 无结果返回非零退出码 → `set -e` 立即终止脚本
+**解决**：所有可能失败的命令后面加 `|| true`
+```bash
+pid=$(lsof -t -i :3001 2>/dev/null || true)  # ✅ 正确
+pid=$(lsof -t -i :3001)                       # ❌ 会杀脚本
+```
+
+### 5.2 yt-dlp 沙箱重建后丢失
+
+**问题**：安装到 `/usr/local/bin/` 等系统目录，沙箱重建后消失
+**解决**：安装到项目目录 `download/tools/yt-dlp`，dev.sh 每次自动检查
+```bash
+YTDLP_PATH="$PROJECT_DIR/download/tools/yt-dlp"
+if [ ! -f "$YTDLP_PATH" ]; then
+    curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$YTDLP_PATH"
+    chmod +x "$YTDLP_PATH"
+fi
+```
+
+### 5.3 `--js-runtimes node` 参数遗漏
+
+**问题**：yt-dlp 解密 YouTube 签名必须加此参数，分散调用容易遗漏
+**解决**：所有调用走统一模块 `src/lib/yt-dlp.ts`，`BASE_ARGS` 自动注入
+```typescript
+const BASE_ARGS = ['--js-runtimes', 'node', '--no-check-certificates', '--no-warnings'];
+```
+
+### 5.4 engine-keeper 与 dev.sh mini-services 端口冲突
+
+**问题**：engine-keeper lazy start 先占了 3001，dev.sh 的 start_mini_services 再启动 stream-engine 就 EADDRINUSE
+**现状**：dev.sh 的 stream-engine 启动会失败但脚本不会中断（disown + 后台）
+**真正生效**：engine-keeper 通过 next-server 子进程启动的 stream-engine
+**建议**：可以在 dev.sh 的 start_mini_services 中跳过 stream-engine（如果 3001 已被占用）
+
+### 5.5 Prisma standalone 构建 500 错误
+
+**问题**：Next.js standalone 输出的 @prisma/client 是 stub，缺少 runtime/ 目录
+**解决**：build.sh 三步修复：复制完整 @prisma/client + .prisma/client + schema.prisma
+
+### 5.6 前端 API 调用不能写端口号
+
+**问题**：Caddy 网关限制，必须通过 `XTransformPort` query 传递端口
+**解决**：
+```typescript
+// ❌ 错误：fetch('http://localhost:3001/health')
+// ✅ 正确：
+const url = `${ENGINE_BASE_URL}/health`;  // ENGINE_BASE_URL = 'http://127.0.0.1:3001'
+// 服务端内部调用走 localhost 直连，不需要 XTransformPort
+```
+
+## 六、关键文件索引
+
+| 文件 | 作用 |
+|------|------|
+| `/start.sh` | 系统容器入口，驱动 Caddy + dev.sh |
+| `.zscripts/dev.sh` | 项目开发启动脚本 |
+| `.zscripts/build.sh` | 生产构建脚本（tar 打包） |
+| `.zscripts/start.sh` | 生产部署启动脚本（Docker /app） |
+| `src/lib/engine.ts` | Engine 客户端，所有 engine 调用入口 |
+| `src/lib/engine-keeper.ts` | Engine 自动启动/健康检查/自动恢复 |
+| `src/lib/yt-dlp.ts` | yt-dlp 统一调用模块（Next.js 侧） |
+| `mini-services/stream-engine/lib/yt-dlp.ts` | yt-dlp 统一调用模块（Engine 侧） |
+| `src/lib/paths.ts` | 统一路径配置（环境变量优先） |
+| `mini-services/proxy/index.ts` | 4000→3000 反向代理 |
+| `Caddyfile` | Caddy 网关配置（port 81，XTransformPort 路由） |
+| `prisma/schema.prisma` | 数据库模型定义 |
+
+---
+Task ID: SOP-002
+Agent: Main Agent
+Task: 修复频道解析反复失败（execSync shell 注入问题）
+
+Work Log:
+- 频道解析 API 返回 500，但命令行直接调用 yt-dlp 完全正常
+- 用 Node.js execSync 复现：`execSync("yt-dlp --print %(thumbnail)s ...")` → `/bin/sh: Syntax error: "(" unexpected`
+- 根因：`execSync(字符串)` 将整个命令传给 `/bin/sh` 执行，`%(thumbnail)s` 的括号被 shell 解释为子命令语法
+- 这是之前创建统一模块时埋下的 bug：用了 `execSync` 拼字符串而非 `spawnSync` 传数组
+- 修复 3 个文件共 4 处：
+  1. `src/lib/yt-dlp.ts` — 新增 `execYtDlp()` 函数用 `spawnSync(数组)`，替换 `getVideoInfo`/`getChannelVideos`/`getStreamUrl` 中的 `execSync`
+  2. `mini-services/stream-engine/lib/yt-dlp.ts` — 同样新增 `execYtDlp()` 替换 `getStreamUrl` 中的 `execSync`
+  3. `src/app/api/relays/[id]/start/route.ts` — `getYoutubeStreamUrl()` 的 `execSync` 改为 `spawnSync`
+- 全局排查确认无其他 `execSync` 调用 yt-dlp 的地方（stream-engine/index.ts 中的 execSync 只用于 `df -h`/`ffmpeg -version` 等安全命令）
+- ESLint 零报错
+
+Stage Summary:
+- 根因：`execSync(字符串)` 经过 `/bin/sh`，`%(xxx)s` 括号触发 shell 语法错误
+- 修复：统一改用 `spawnSync(数组)` 传参，不经过 shell 解释
+- 验证：`@bitmusic.official` 频道解析恢复正常，返回 5 条视频数据含标题、时长、缩略图

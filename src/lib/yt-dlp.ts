@@ -10,9 +10,30 @@
  *   5. 统一的日志前缀 [yt-dlp]
  */
 
-import { execSync, spawnSync, spawn, type ChildProcess } from 'child_process';
+import { spawnSync, spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { YT_DLP_PATH, COOKIES_PATH } from '@/lib/paths';
+
+/**
+ * 执行 yt-dlp 命令（同步）。
+ * 使用 spawnSync 传数组，不经过 shell，避免 %(xxx)s 等特殊字符被 shell 解释。
+ */
+function execYtDlp(args: string[], timeout = 60000, maxBuffer = 10 * 1024 * 1024): {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+} {
+  const result = spawnSync(YT_DLP_PATH, args, {
+    encoding: 'utf-8',
+    timeout,
+    maxBuffer,
+  });
+  return {
+    success: result.status === 0 && !result.error,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
 
 // ──────────────────────────────────────────────────
 // 公共基础参数 — 所有调用自动注入
@@ -77,18 +98,17 @@ export function getVideoInfo(url: string, timeout = 60000): YtDlpVideoInfo | nul
     url,
   ]);
 
+  const { success, stdout, stderr } = execYtDlp(args, timeout, 1024 * 1024);
+  if (!success) {
+    console.error(`[yt-dlp] getVideoInfo FAILED for ${url}: ${stderr.substring(0, 500)}`);
+    return null;
+  }
   try {
-    const json = execSync(`"${YT_DLP_PATH}" ${args.join(' ')}`, {
-      encoding: 'utf-8',
-      timeout,
-      maxBuffer: 1024 * 1024,
-    });
-    const parsed = JSON.parse(json) as YtDlpVideoInfo;
+    const parsed = JSON.parse(stdout) as YtDlpVideoInfo;
     if (!parsed || !parsed.id) return null;
     return parsed;
   } catch (err) {
-    const stderr = (err as { stderr?: string }).stderr || '';
-    console.error(`[yt-dlp] getVideoInfo FAILED for ${url}: ${stderr.substring(0, 500)}`);
+    console.error(`[yt-dlp] getVideoInfo parse FAILED for ${url}: ${String(err)}`);
     return null;
   }
 }
@@ -119,17 +139,12 @@ export function getChannelVideos(url: string, maxVideos = 50, timeout = 60000): 
       url,
     ]);
 
-    try {
-      const stdout = execSync(`"${YT_DLP_PATH}" ${args.join(' ')}`, {
-        encoding: 'utf-8',
-        timeout,
-        maxBuffer: 10 * 1024 * 1024,
-      });
-      if (stdout.trim()) return stdout;
-    } catch (err) {
-      const stderr = (err as { stderr?: string }).stderr || '';
-      console.error(`[yt-dlp] getChannelVideos [${attempt.label}] FAILED: ${stderr.substring(0, 500)}`);
+    const { success, stdout, stderr } = execYtDlp(args, timeout);
+    if (success && stdout.trim()) {
+      return stdout;
     }
+    console.error(`[yt-dlp] getChannelVideos [${attempt.label}] FAILED: ${stderr.substring(0, 500)}`);
+
   }
 
   return null;
@@ -147,17 +162,12 @@ export function getStreamUrl(url: string, quality = 'best', timeout = 30000): st
     url,
   ]);
 
-  try {
-    const stdout = execSync(`"${YT_DLP_PATH}" ${args.join(' ')}`, {
-      encoding: 'utf-8',
-      timeout,
-    }).trim();
-    return stdout || null;
-  } catch (err) {
-    const stderr = (err as { stderr?: string }).stderr || '';
-    console.error(`[yt-dlp] getStreamUrl FAILED for ${url}: ${stderr.substring(0, 500)}`);
-    return null;
+  const { success, stdout, stderr } = execYtDlp(args, timeout);
+  if (success) {
+    return stdout.trim() || null;
   }
+  console.error(`[yt-dlp] getStreamUrl FAILED for ${url}: ${stderr.substring(0, 500)}`);
+  return null;
 }
 
 // ──────────────────────────────────────────────────

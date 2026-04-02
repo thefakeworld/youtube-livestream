@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { processManager } from '@/lib/process-manager';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { YT_DLP_PATH } from '@/lib/paths';
 
 /**
@@ -9,11 +9,16 @@ import { YT_DLP_PATH } from '@/lib/paths';
  */
 function getYoutubeStreamUrl(url: string, quality: string): string | null {
   try {
-    const jsonStr = execSync(
-      `"${YT_DLP_PATH}" -J --no-download --no-warnings "${url}"`,
-      { encoding: 'utf-8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 }
+    const result = spawnSync(
+      YT_DLP_PATH,
+      ['-J', '--no-download', '--no-warnings', url],
+      { encoding: 'utf-8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 },
     );
-    const info = JSON.parse(jsonStr);
+    if (result.status !== 0 || !result.stdout) {
+      console.error('getYoutubeStreamUrl failed:', result.stderr?.toString().substring(0, 500));
+      return null;
+    }
+    const info = JSON.parse(result.stdout);
 
     // 检查是否是直播
     if (!info.is_live) {

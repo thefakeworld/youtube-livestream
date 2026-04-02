@@ -12,7 +12,7 @@
  *   5. 统一的日志前缀 [yt-dlp]
  */
 
-import { execSync, spawnSync, spawn } from "child_process";
+import { spawnSync } from "child_process";
 import { existsSync } from "fs";
 
 // ──────────────────────────────────────────────────
@@ -45,6 +45,26 @@ function buildArgs(extra: string[]): string[] {
   return args;
 }
 
+/**
+ * 执行 yt-dlp（同步），使用 spawnSync 传数组，不经过 shell。
+ */
+function execYtDlp(args: string[], timeout = 60000, maxBuffer = 10 * 1024 * 1024): {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+} {
+  const result = spawnSync(YTDL_PATH, args, {
+    encoding: "utf-8",
+    timeout,
+    maxBuffer,
+  });
+  return {
+    success: result.status === 0 && !result.error,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+  };
+}
+
 // ──────────────────────────────────────────────────
 // 同步方法
 // ──────────────────────────────────────────────────
@@ -60,17 +80,12 @@ export function getStreamUrl(url: string, quality = "best", timeout = 30000): st
     url,
   ]);
 
-  try {
-    const stdout = execSync(`"${YTDL_PATH}" ${args.join(" ")}`, {
-      encoding: "utf-8",
-      timeout,
-    }).trim();
-    return stdout || null;
-  } catch (err: any) {
-    const stderr = err?.stderr || err?.message || String(err);
-    console.error(`[yt-dlp] getStreamUrl FAILED for ${url}: ${stderr.substring(0, 500)}`);
-    return null;
+  const { success, stdout, stderr } = execYtDlp(args, timeout);
+  if (success) {
+    return stdout.trim() || null;
   }
+  console.error(`[yt-dlp] getStreamUrl FAILED for ${url}: ${stderr.substring(0, 500)}`);
+  return null;
 }
 
 // ──────────────────────────────────────────────────
