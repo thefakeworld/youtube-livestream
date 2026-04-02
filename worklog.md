@@ -800,3 +800,106 @@ Stage Summary:
 - 根因：`execSync(字符串)` 经过 `/bin/sh`，`%(xxx)s` 括号触发 shell 语法错误
 - 修复：统一改用 `spawnSync(数组)` 传参，不经过 shell 解释
 - 验证：`@bitmusic.official` 频道解析恢复正常，返回 5 条视频数据含标题、时长、缩略图
+
+---
+Task ID: SOP-003
+Agent: Main Agent
+Task: 修复推流任务日志显示"暂无进程输出"
+
+Work Log:
+- 用户报告推流中（斗鱼任务 status=live）但日志对话框显示"暂无进程输出"
+- 检查 engine `/api/processes/stream_xxx/output` → 404，该路由从未实现
+- 检查 Next.js output route fallback 链：engine 404 → local processManager（无数据，进程在 engine 里） → log file（不存在）→ 空数组
+- 根因：engine 的 `FFmpegProcess` 接口只有 `lastOutput: string`（最后一行），没有 logs 数组；stderr handler 只解析 FPS 等统计信息，不存储日志文本；`/api/processes/:id/output` 路由根本不存在
+
+- 修复 engine（mini-services/stream-engine/index.ts）：
+  1. `FFmpegProcess` 接口增加 `logs: string[]` 和 `logSeq: number` 字段
+  2. `_startFFmpegProcess()` 中 stderr handler 增加 logs push（rolling buffer，上限 2000 行）
+  3. `PlaylistRunner.streamFile()` 中 stderr handler 同样增加 logs push
+  4. 新增 `GET /api/processes/:taskId/output` 路由，支持 `since`（序列号偏移）和 `limit` 参数
+  5. 404 时返回 `{ error, taskId, data: [] }` 方便 Next.js fallback
+
+- 修复 Next.js output route 注释说明
+- 注意：engine 通过 engine-keeper 的 `spawn('bun', [entryPath])` 启动（非 `--hot`），修改后需杀旧进程让 keeper 重启
+
+Stage Summary:
+- Engine 新增 output 路由和 logs 存储，推流日志将实时显示 FFmpeg 输出
+- Rolling buffer 2000 行防止内存溢出
+- 需要新启动的推流任务才有日志（已运行的旧进程 logs 为空）
+---
+Task ID: 13 - fix-flushSync-and-engine-output
+Agent: Main Agent
+Task: 修复 StreamLogDialog flushSync React 错误 + Engine output endpoint 缺少 logs 字段
+
+Work Log:
+- 修复 Bug 1: flushSync 在 useEffect 内调用导致 React 报错
+  - 原因: React 18+ 不允许在 commit phase (useEffect) 调用 flushSync
+  - 方案: 用 key-based remount 替代 useEffect reset
+  - stream-tasks-panel.tsx: 添加 logDialogKey state，每次打开日志时递增
+  - stream-log-dialog.tsx: 移除 useEffect 中的 flushSync 和 setState 调用
+  - 父组件传递 key={logDialogKey}，每次打开对话框自动重新挂载，所有状态回到初始值
+  - 移除 flushSync 导入
+- 修复 Bug 2: Engine output endpoint (/api/processes/{id}/output) 返回数据不含 logs
+  - 原因: endpoint 调用 manager.getProcess(taskId) 返回格式化的进程信息，不含 logs[] 和 logSeq 字段
+  - proc.logs.slice() 在 undefined 上调用会崩溃
+  - 修复: 改为 manager.getProcessEntry(taskId)，返回原始 FFmpegProcess 对象（含 logs/logSeq）
+  - 添加 (entry.logs || []).slice() 防御性编程
+
+Stage Summary:
+- flushSync React 错误已修复: 使用 key-based remount 模式，通过 react-hooks/set-state-in-effect lint 规则
+- Engine output endpoint 可以正确返回 FFmpeg 日志数据
+- ESLint 通过，零错误
+---
+Task ID: 3
+Agent: Main Agent
+Task: Fix React duplicate key error and useEffect dependency loop in StreamLogDialog
+
+Work Log:
+- Identified root cause: `lastId` (state) and `outputSeq` (state) were in useEffect dependency arrays, causing effect re-runs on every state update
+- Each re-run triggered the initial fetch function again, producing overlapping/duplicate log entries
+- Replaced `lastId` state → `lastIdRef` (useRef) to avoid effect re-triggering
+- Replaced `outputSeq` state → `outputSeqRef` (useRef) for same reason
+- Added deduplication guard in event log polling: filter new logs by existing id Set before merging
+- Removed unused `outputSeq` state and `setLastId`/`setOutputSeq` calls
+- Updated dependency arrays: event logs effect → `[open, taskId, isLive, isDead]`, output effect → `[open, taskId]`
+
+Stage Summary:
+- Fixed React "Encountered two children with the same key" console error in StreamLogDialog
+- Fixed potential cause of "暂无进程输出" — output polling no longer recreates intervals on every data update
+- Lint passes clean
+- Modified: `src/components/streams/stream-log-dialog.tsx`
+---
+Task ID: 4
+Agent: Main Agent
+Task: Implement batch download queue and batch delete for video library
+
+Work Log:
+- Created `src/lib/download-queue.ts` — DownloadQueueManager singleton with sequential auto-advance
+  - Queue stores video items with status tracking (waiting/downloading/completed/failed)
+  - Auto-skips already-cached, currently-downloading, or duplicate items
+  - Uses existing yt-dlp spawnDownload for actual downloads
+  - Updates DB status on completion/failure, creates StreamLog entries
+  - Auto-advances to next item 500ms after current finishes/fails
+  - Provides full queue status API (current, waiting, completed, failed counts + items)
+- Created `src/app/api/videos/queue/route.ts` — Queue API
+  - GET: returns full queue status
+  - POST: adds videoIds to queue (with skip validation)
+  - DELETE: clears entire queue, or removes specific videoId via query param
+- Created `src/app/api/videos/batch-delete/route.ts` — Batch delete API
+  - POST: accepts `{ ids: string[] }`, checks active streams, deletes files + DB records
+  - Max 100 items per batch, cascade deletes playlist items
+- Updated `src/components/videos/video-library-panel.tsx` — Full UI overhaul
+  - Added multi-select checkboxes (header select-all + per-row)
+  - Batch action toolbar appears when items are selected (Download Selected / Delete Selected / Clear)
+  - Queue status dialog showing progress bar, current download, waiting list, completed & failed
+  - Queue polling (3s) with toast notifications on completion/failure
+  - Queue indicator button in header when queue is active
+  - Batch delete confirmation dialog
+  - Stop & Clear Queue button in queue dialog
+  - Mobile: select-all bar + ring highlight on selected cards
+
+Stage Summary:
+- New files: `src/lib/download-queue.ts`, `src/app/api/videos/queue/route.ts`, `src/app/api/videos/batch-delete/route.ts`
+- Modified: `src/components/videos/video-library-panel.tsx` (complete rewrite with selection + queue features)
+- Lint passes clean
+- Features: sequential download queue with auto-advance, batch delete with active stream check, multi-select UI

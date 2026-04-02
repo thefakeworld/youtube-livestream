@@ -30,6 +30,8 @@ export async function GET(
           from: 'engine',
         });
       }
+      // Engine returned 404 — process exists but no output endpoint, or process not found
+      // Either way, fall through to local/file fallbacks
     } catch {
       // Engine not reachable — fall through to local fallback
     }

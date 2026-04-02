@@ -102,6 +102,10 @@ interface FFmpegProcess {
   retryCount: number;
   lastOutput: string;
   bytesWritten: number;
+  /** Rolling log buffer (stderr + stdout lines) */
+  logs: string[];
+  /** Total lines ever pushed (monotonically increasing sequence) */
+  logSeq: number;
 }
 
 interface SystemStats {
@@ -794,6 +798,11 @@ class PlaylistRunner {
             if (!entry) continue;
             entry.lastOutput = trimmed;
 
+            // Store in rolling log buffer
+            entry.logs.push(trimmed);
+            if (entry.logs.length > 2000) entry.logs.shift();
+            entry.logSeq++;
+
             const parsed = parseFFmpegLine(trimmed);
             if (parsed.frame !== undefined) {
               entry.stats.frame = parsed.frame || entry.stats.frame;
@@ -1146,7 +1155,11 @@ class ProcessManager {
       retryCount: 0,
       lastOutput: "",
       bytesWritten: 0,
+      logs: [],
+      logSeq: 0,
     };
+
+    const MAX_LOG_LINES = 2000;
 
     this.processes.set(taskId, entry);
     console.log(`[${type}] Task ${taskId} started with PID ${proc.pid}`);
@@ -1163,6 +1176,11 @@ class ProcessManager {
           const trimmed = line.trim();
           if (!trimmed) continue;
           entry.lastOutput = trimmed;
+
+          // Store in rolling log buffer
+          entry.logs.push(trimmed);
+          if (entry.logs.length > MAX_LOG_LINES) entry.logs.shift();
+          entry.logSeq++;
 
           // Parse FFmpeg stats
           const parsed = parseFFmpegLine(trimmed);
@@ -1650,6 +1668,22 @@ async function handleRequest(req: Request): Promise<Response> {
       return jsonResponse({ error: "Process not found", taskId }, 404);
     }
     return jsonResponse(proc);
+  }
+
+  // ── Processes: Get Output Logs ─────────────────
+  const outputMatch = path.match(/^\/api\/processes\/([a-zA-Z0-9_-]+)\/output$/);
+  if (outputMatch && req.method === "GET") {
+    const taskId = outputMatch[1];
+    // Use getProcessEntry() which returns the raw FFmpegProcess with logs/logSeq fields
+    const entry = manager.getProcessEntry(taskId);
+    if (!entry) {
+      return jsonResponse({ error: "Process not found", taskId, data: [] }, 404);
+    }
+    const sp = new URL(req.url).searchParams;
+    const since = parseInt(sp.get("since") || "0", 10);
+    const limit = parseInt(sp.get("limit") || "200", 10);
+    const logs = (entry.logs || []).slice(since, since + limit);
+    return jsonResponse({ data: logs, seq: entry.logSeq || 0 });
   }
 
   // ── System Stats ─────────────────────────────

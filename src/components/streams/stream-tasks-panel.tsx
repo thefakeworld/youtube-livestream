@@ -419,6 +419,7 @@ export function StreamTasksPanel() {
     videoBitrate: "4500", audioBitrate: "128", resolution: "1920x1080", fps: "30", preset: "veryfast",
   });
   const [logTaskId, setLogTaskId] = useState<string | null>(null);
+  const [logDialogKey, setLogDialogKey] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchTasks = useCallback(async () => {
@@ -774,7 +775,7 @@ export function StreamTasksPanel() {
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {tasks.map((task) => (
-            <StreamCard key={task.id} task={task} process={getProcessForTask(task)} onStart={handleStart} onStop={handleStop} onEdit={handleOpenEdit} onDelete={setDeleteId} isStarting={startingIds.has(task.id)} isStopping={stoppingIds.has(task.id)} onLogOpen={() => setLogTaskId(task.id)} />
+            <StreamCard key={task.id} task={task} process={getProcessForTask(task)} onStart={handleStart} onStop={handleStop} onEdit={handleOpenEdit} onDelete={setDeleteId} isStarting={startingIds.has(task.id)} isStopping={stoppingIds.has(task.id)} onLogOpen={() => { setLogTaskId(task.id); setLogDialogKey(k => k + 1); }} />
           ))}
         </div>
       )}
@@ -1091,6 +1092,7 @@ export function StreamTasksPanel() {
         const logDisplayStatus = logDbLive && logProcAlive ? "live" : logDbLive && !logProcAlive ? "dead" : (logTask?.status || "idle");
         return (
           <StreamLogDialog
+            key={logDialogKey}
             open={!!logTaskId}
             onOpenChange={(open) => { if (!open) setLogTaskId(null); }}
             taskId={logTaskId}

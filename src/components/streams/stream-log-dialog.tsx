@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { flushSync } from "react-dom";
 import {
   Terminal,
   Activity,
@@ -106,29 +105,13 @@ export function StreamLogDialog({
   const [activeTab, setActiveTab] = useState<"events" | "output">("events");
   const [eventLogs, setEventLogs] = useState<LogEntry[]>([]);
   const [ffLines, setFfLines] = useState<string[]>([]);
-  const [outputSeq, setOutputSeq] = useState(0);
-  const [lastId, setLastId] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const logEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const dbLogsRef = useRef<LogEntry[]>([]);
+  const lastIdRef = useRef("");
 
-  // Reset on open
-  const prevOpenRef = useRef(false);
-  useEffect(() => {
-    if (open && !prevOpenRef.current) {
-      flushSync(() => {
-        setEventLogs([]);
-        setFfLines([]);
-        setOutputSeq(0);
-        setAutoScroll(true);
-        setActiveTab("events");
-        dbLogsRef.current = [];
-        setLastId("");
-      });
-    }
-    prevOpenRef.current = open;
-  }, [open]);
+  // State reset handled by parent via key={logDialogKey} remount — no effect needed
 
   // Fetch event logs (DB)
   useEffect(() => {
@@ -147,7 +130,7 @@ export function StreamLogDialog({
         if (!cancelled) {
           dbLogsRef.current = logs;
           setEventLogs(logs);
-          if (logs.length > 0) setLastId(logs[logs.length - 1].id);
+          if (logs.length > 0) lastIdRef.current = logs[logs.length - 1].id;
         }
       } catch { /* silent */ }
     };
@@ -155,27 +138,33 @@ export function StreamLogDialog({
     fetchLogs();
     if (isLive || isDead) {
       const iv = setInterval(async () => {
-        if (cancelled || !lastId) return;
+        if (cancelled || !lastIdRef.current) return;
         try {
           const params = new URLSearchParams();
-          params.set("sinceId", lastId);
+          params.set("sinceId", lastIdRef.current);
           params.set("limit", "20");
           const res = await fetch(`/api/streams/${taskId}/logs?${params}`);
           if (!res.ok || cancelled) return;
           const json = await res.json();
           const newLogs: LogEntry[] = json.data || [];
           if (newLogs.length > 0 && !cancelled) {
-            dbLogsRef.current = [...newLogs, ...dbLogsRef.current].slice(-100);
-            setEventLogs(dbLogsRef.current);
-            setLastId(newLogs[newLogs.length - 1].id);
+            // Deduplicate by id before merging
+            const existingIds = new Set(dbLogsRef.current.map(l => l.id));
+            const unique = newLogs.filter(l => !existingIds.has(l.id));
+            if (unique.length > 0) {
+              dbLogsRef.current = [...unique, ...dbLogsRef.current].slice(-100);
+              setEventLogs([...dbLogsRef.current]);
+            }
+            lastIdRef.current = newLogs[newLogs.length - 1].id;
           }
         } catch { /* silent */ }
       }, 5000);
       return () => { cancelled = true; clearInterval(iv); };
     }
-  }, [open, taskId, isLive, isDead, lastId]);
+  }, [open, taskId, isLive, isDead]);
 
   // Fetch FFmpeg output
+  const outputSeqRef = useRef(0);
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -184,13 +173,13 @@ export function StreamLogDialog({
       if (cancelled) return;
       try {
         const params = new URLSearchParams();
-        if (outputSeq > 0) params.set("since", String(outputSeq));
+        if (outputSeqRef.current > 0) params.set("since", String(outputSeqRef.current));
         params.set("limit", "200");
         const res = await fetch(`/api/streams/${taskId}/output?${params}`);
         if (!res.ok || cancelled) return;
         const json = await res.json();
-        if (json.seq > outputSeq) {
-          setOutputSeq(json.seq);
+        if (json.seq > outputSeqRef.current) {
+          outputSeqRef.current = json.seq;
           const lines: string[] = json.data || [];
           // Deduplicate consecutive stat lines
           const deduped: string[] = [];
@@ -201,7 +190,9 @@ export function StreamLogDialog({
               deduped.push(line);
             }
           }
-          setFfLines((prev) => [...prev, ...deduped].slice(-300));
+          if (deduped.length > 0 && !cancelled) {
+            setFfLines((prev) => [...prev, ...deduped].slice(-300));
+          }
         }
       } catch { /* silent */ }
     };
@@ -209,7 +200,7 @@ export function StreamLogDialog({
     fetchOutput();
     const iv = setInterval(fetchOutput, 2000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [open, taskId, outputSeq]);
+  }, [open, taskId]);
 
   // Auto-scroll
   useEffect(() => {
